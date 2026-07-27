@@ -1,0 +1,612 @@
+## ========================= SUPPRESS WARNINGS =========================
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+import warnings
+warnings.filterwarnings("ignore")
+
+# ========================= IMPORTS =========================
+import gc
+gc.collect()
+
+import cv2
+import kaggle
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import tensorflow as tf
+
+from tqdm import tqdm
+
+from sklearn.utils import resample
+from sklearn.model_selection import train_test_split
+
+# ========================= GPU MEMORY FIX =========================
+gpus = tf.config.experimental.list_physical_devices('GPU')
+
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+
+        print("GPU Enabled Successfully")
+
+    except RuntimeError as e:
+        print(e)
+
+else:
+    print("Running on CPU")
+
+# ========================= CONFIG =========================
+IMG_SIZE = 380
+TARGET_SIZE = 700
+SEED = 42
+NUM_CLASSES = 5
+
+classes = [
+    "Healthy",
+    "Mild DR",
+    "Moderate DR",
+    "Proliferate DR",
+    "Severe DR"
+]
+
+label_encoder = {
+    "Healthy": 0,
+    "Mild DR": 1,
+    "Moderate DR": 2,
+    "Proliferate DR": 3,
+    "Severe DR": 4
+}
+# =========================================================
+# CREATE X.npy AND y.npy FROM DATASET
+# =========================================================
+
+import os
+import cv2
+import numpy as np
+from tqdm import tqdm
+
+IMG_SIZE = 380
+
+DATASET_DIR = "/kaggle/input/your-dataset-folder"
+
+CLASS_NAMES = [
+    "No_DR",
+    "Mild",
+    "Moderate",
+    "Severe",
+    "Proliferative_DR"
+]
+
+X = []
+y = []
+
+# ========================= DOWNLOAD DATASET =========================
+download_path = "dr_dataset"
+
+os.makedirs(download_path, exist_ok=True)
+
+print("Downloading Dataset...")
+
+kaggle.api.dataset_download_files(
+    'sachinkumar413/diabetic-retinopathy-dataset',
+    path=download_path,
+    unzip=True
+)
+
+print("Dataset Downloaded Successfully")
+
+# ========================= CREATE DATAFRAME =========================
+data = []
+
+for label in classes:
+
+    folder = os.path.join(download_path, label)
+
+    if not os.path.exists(folder):
+        continue
+
+    for file in os.listdir(folder):
+
+        image_path = os.path.join(folder, file)
+
+        data.append([image_path, label])
+
+df = pd.DataFrame(data, columns=["image_path", "label"])
+
+print("Total Images:", len(df))
+
+# ========================= REMOVE CORRUPTED IMAGES =========================
+valid_images = []
+
+print("Checking Images...")
+
+for _, row in tqdm(df.iterrows(), total=len(df)):
+
+    try:
+        img = cv2.imread(row["image_path"])
+
+        if img is not None:
+            valid_images.append(True)
+        else:
+            valid_images.append(False)
+
+    except:
+        valid_images.append(False)
+
+df = df[valid_images].reset_index(drop=True)
+
+print("Valid Images:", len(df))
+# ========================= ADVANCED DATA CLEANING =========================
+
+print("\nRunning Advanced Data Cleaning...\n")
+
+cleaned_rows = []
+
+hashes = set()
+
+removed_blurry = 0
+removed_overexposed = 0
+removed_underexposed = 0
+removed_low_info = 0
+removed_small = 0
+removed_duplicate = 0
+
+# ========================= BLUR DETECTION =========================
+def is_blurry(img, threshold=35):
+
+    gray = cv2.cvtColor(
+        img,
+        cv2.COLOR_RGB2GRAY
+    )
+
+    variance = cv2.Laplacian(
+        gray,
+        cv2.CV_64F
+    ).var()
+
+    return variance < threshold
+
+# ========================= OVEREXPOSURE CHECK =========================
+def is_overexposed(img, threshold=245):
+
+    gray = cv2.cvtColor(
+        img,
+        cv2.COLOR_RGB2GRAY
+    )
+
+    bright_ratio = np.mean(
+        gray > threshold
+    )
+
+    return bright_ratio > 0.35
+
+# ========================= UNDEREXPOSURE CHECK =========================
+def is_underexposed(img, threshold=15):
+
+    gray = cv2.cvtColor(
+        img,
+        cv2.COLOR_RGB2GRAY
+    )
+
+    dark_ratio = np.mean(
+        gray < threshold
+    )
+
+    return dark_ratio > 0.50
+
+# ========================= LOW INFORMATION CHECK =========================
+def has_enough_information(img):
+
+    gray = cv2.cvtColor(
+        img,
+        cv2.COLOR_RGB2GRAY
+    )
+
+    return np.std(gray) > 18
+
+# ========================= IMAGE SIZE CHECK =========================
+def is_valid_size(img):
+
+    h, w = img.shape[:2]
+
+    return h >= 150 and w >= 150
+
+# ========================= CLEANING LOOP =========================
+for _, row in tqdm(
+    df.iterrows(),
+    total=len(df)
+):
+
+    try:
+
+        path = row["image_path"]
+
+        img = cv2.imread(path)
+
+        if img is None:
+            continue
+
+        img = cv2.cvtColor(
+            img,
+            cv2.COLOR_BGR2RGB
+        )
+
+        # ================= SIZE CHECK =================
+        if not is_valid_size(img):
+
+            removed_small += 1
+            continue
+
+        # ================= BLUR CHECK =================
+        if is_blurry(img):
+
+            removed_blurry += 1
+            continue
+
+        # ================= OVEREXPOSURE CHECK =================
+        if is_overexposed(img):
+
+            removed_overexposed += 1
+            continue
+
+        # ================= UNDEREXPOSURE CHECK =================
+        if is_underexposed(img):
+
+            removed_underexposed += 1
+            continue
+
+        # ================= LOW INFORMATION CHECK =================
+        if not has_enough_information(img):
+
+            removed_low_info += 1
+            continue
+
+        # ================= DUPLICATE IMAGE CHECK =================
+        small = cv2.resize(
+            img,
+            (32, 32)
+        )
+
+        image_hash = hash(
+            small.tobytes()
+        )
+
+        if image_hash in hashes:
+
+            removed_duplicate += 1
+            continue
+
+        hashes.add(image_hash)
+
+        cleaned_rows.append(row)
+
+    except:
+
+        continue
+
+# ========================= CLEAN CLEAN DATAFRAME =========================
+df = pd.DataFrame(cleaned_rows)
+
+df = df.reset_index(drop=True)
+
+# ========================= CLEANING SUMMARY =========================
+print("\n========== CLEANING SUMMARY ==========")
+
+print("Removed Blurry Images:", removed_blurry)
+
+print("Removed Overexposed Images:", removed_overexposed)
+
+print("Removed Underexposed Images:", removed_underexposed)
+
+print("Removed Low Information Images:", removed_low_info)
+
+print("Removed Small Images:", removed_small)
+
+print("Removed Duplicate Images:", removed_duplicate)
+
+print("\nRemaining Clean Images:", len(df))
+
+# ========================= BALANCE DATASET =========================
+balanced_data = []
+
+for label in classes:
+
+    subset = df[df["label"] == label]
+
+    balanced_subset = resample(
+        subset,
+        replace=len(subset) < TARGET_SIZE,
+        n_samples=TARGET_SIZE,
+        random_state=SEED
+    )
+
+    balanced_data.append(balanced_subset)
+
+df = pd.concat(balanced_data)
+
+df = df.sample(frac=1, random_state=SEED).reset_index(drop=True)
+
+print("\nBalanced Dataset:")
+print(df["label"].value_counts())
+
+
+# ========================= RETINA CROP FUNCTION =========================
+def crop_black_background(img):
+
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+    _, thresh = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY)
+
+    coords = cv2.findNonZero(thresh)
+
+    if coords is not None:
+
+        x, y, w, h = cv2.boundingRect(coords)
+
+        img = img[y:y+h, x:x+w]
+
+    return img
+
+# ========================= PREPROCESS FUNCTION =========================
+
+def preprocess_retinal_image(path, size=IMG_SIZE):
+
+    img = cv2.imread(path)
+
+    if img is None:
+        raise ValueError(f"Cannot Read Image: {path}")
+
+    # ================= BGR → RGB =================
+    img = cv2.cvtColor(
+        img,
+        cv2.COLOR_BGR2RGB
+    )
+
+    # ================= CROP BLACK BACKGROUND =================
+    img = crop_black_background(img)
+
+    # ================= RESIZE =================
+    img = cv2.resize(
+        img,
+        (size, size)
+    )
+
+    # ================= GREEN CHANNEL EXTRACTION =================
+    # Green channel contains most retinal lesion details
+    green_channel = img[:, :, 1]
+
+    # ================= CLAHE ENHANCEMENT =================
+    clahe = cv2.createCLAHE(
+
+        clipLimit=3.0,
+
+        tileGridSize=(8, 8)
+    )
+
+    enhanced = clahe.apply(green_channel)
+
+    # ================= GAUSSIAN BLUR =================
+    blurred = cv2.GaussianBlur(
+        enhanced,
+        (5, 5),
+        0
+    )
+
+    # ================= SHARPENING =================
+    sharpened = cv2.addWeighted(
+        enhanced,
+        1.5,
+        blurred,
+        -0.5,
+        0
+    )
+
+    # ================= NORMALIZATION =================
+    normalized = cv2.normalize(
+        sharpened,
+        None,
+        0,
+        255,
+        cv2.NORM_MINMAX
+    )
+
+    # ================= CONVERT BACK TO RGB =================
+    img = cv2.merge([
+        normalized,
+        normalized,
+        normalized
+    ])
+
+    return img.astype(np.uint8)
+# ========================= LOAD ALL IMAGES =========================
+print("\nLoading & Preprocessing Images...")
+
+X = []
+y = []
+
+for _, row in tqdm(df.iterrows(), total=len(df)):
+
+    try:
+
+        img = preprocess_retinal_image(row["image_path"])
+
+        X.append(img)
+
+        y.append(label_encoder[row["label"]])
+
+    except Exception as e:
+
+        print("Skipped:", e)
+
+X = np.array(X, dtype=np.uint8)
+
+y = np.array(y)
+
+print("\nDataset Shape:")
+print("X:", X.shape)
+print("y:", y.shape)
+
+from sklearn.model_selection import StratifiedKFold
+
+# ========================= STRATIFIED K-FOLD =========================
+skf = StratifiedKFold(
+
+    n_splits=5,
+
+    shuffle=True,
+
+    random_state=SEED
+)
+
+fold_no = 1,2,3,4,5
+
+all_fold_accuracies = []
+
+for train_idx, val_idx in skf.split(X, y):
+
+    print(f"\n========== FOLD {fold_no} ==========\n")
+
+    # ================= SPLIT =================
+    X_train, X_val = X[train_idx], X[val_idx]
+
+    y_train, y_val = y[train_idx], y[val_idx]
+
+    print("Train Shape:", X_train.shape)
+
+    print("Validation Shape:", X_val.shape)
+
+
+# ========================= VISUALIZATION =========================
+plt.figure(figsize=(15, 5))
+
+for i in range(5):
+
+    plt.subplot(1, 5, i + 1)
+
+    plt.imshow(X_train[i])
+
+    plt.title(classes[y_train[i]])
+
+    plt.axis("off")
+
+plt.tight_layout()
+
+plt.show()
+# ========================= RAW VS PROCESSED VISUALIZATION =========================
+
+print("\nGenerating Raw vs Processed Comparison Images...\n")
+
+fig, axes = plt.subplots(NUM_CLASSES, 2, figsize=(10, NUM_CLASSES * 4))
+
+fig.suptitle(
+    "Raw vs Processed Retinal Images",
+    fontsize=18,
+    y=1.02
+)
+
+for i, label in enumerate(classes):
+
+    # Select one sample image from each class
+    sample_row = df[df["label"] == label].iloc[0]
+
+    image_path = sample_row["image_path"]
+
+    # ================= RAW IMAGE =================
+    raw_img = cv2.imread(image_path)
+
+    raw_img = cv2.cvtColor(raw_img, cv2.COLOR_BGR2RGB)
+
+    raw_img = crop_black_background(raw_img)
+
+    raw_img = cv2.resize(raw_img, (IMG_SIZE, IMG_SIZE))
+
+    # ================= PROCESSED IMAGE =================
+    processed_img = preprocess_retinal_image(image_path)
+
+    # ================= DISPLAY RAW =================
+    axes[i, 0].imshow(raw_img)
+
+    axes[i, 0].set_title(
+        f"{label} - Raw",
+        fontsize=12
+    )
+
+    axes[i, 0].axis("off")
+
+    # ================= DISPLAY PROCESSED =================
+    axes[i, 1].imshow(processed_img)
+
+    axes[i, 1].set_title(
+        f"{label} - Processed",
+        fontsize=12
+    )
+
+    axes[i, 1].axis("off")
+
+# ================= SAVE IMAGE =================
+plt.tight_layout()
+
+plt.savefig(
+    "raw_vs_processed_retinal_images.png",
+    dpi=300,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+print("\nSaved: raw_vs_processed_retinal_images.png")
+
+# ========================= SAVE ARRAYS =========================
+np.save("X.npy", X)
+
+np.save("y.npy", y)
+
+print("\nK-Fold Arrays Saved Successfully!")
+# ========================= MEMORY CLEANUP =========================
+gc.collect()
+# ========================= LOAD SAVED ARRAYS FOR K-FOLD =========================
+
+print("\nLoading Saved Arrays For K-Fold Training...\n")
+
+# =========================================================
+# LOAD ARRAYS
+# =========================================================
+print("\nLoading Arrays...\n")
+
+X = np.load("X.npy")
+
+y = np.load("y.npy")
+
+print("\nArrays Loaded Successfully")
+
+print("X Shape:", X.shape)
+
+print("y Shape:", y.shape)
+
+
+# ================= SANITY CHECK =================
+plt.figure(figsize=(15, 5))
+
+for i in range(5):
+
+    plt.subplot(1, 5, i + 1)
+
+    plt.imshow(X[i])
+
+    plt.title(
+        f"Class: {classes[y[i]]}"
+    )
+
+    plt.axis("off")
+
+plt.tight_layout()
+
+plt.show()
+
+print("\nK-Fold Dataset Ready Successfully!")
+np.save("X.npy", X)
+
+np.save("y.npy", y)
